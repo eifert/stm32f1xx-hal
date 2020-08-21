@@ -15,18 +15,24 @@
 use crate::pac::{RCC, RTC};
 
 use crate::backup_domain::BackupDomain;
-use crate::time::Hertz;
+use crate::time::{Hertz, U32Ext};
 
 use core::convert::Infallible;
 
 // The LSE runs at at 32 768 hertz unless an external clock is provided
 const LSE_HERTZ: u32 = 32_768;
 
+pub enum Clock {
+    LSE(Hertz),
+    LSI(Hertz),
+    HSE(Hertz),
+}
 /**
   Interface to the real time clock
 */
 pub struct Rtc {
     regs: RTC,
+    clock_frequency: Hertz,
 }
 
 impl Rtc {
@@ -35,38 +41,38 @@ impl Rtc {
       `Rcc.bkp.constrain()`.
     */
     pub fn rtc(regs: RTC, bkp: &mut BackupDomain) -> Self {
-        let mut result = Rtc { regs };
+        Rtc::rtc_with_clock(Clock::LSE(LSE_HERTZ.hz()), regs, bkp)
+    }
 
-        Rtc::enable_rtc(bkp);
-
-        // Set the prescaler to make it count up once every second.
-        let prl = LSE_HERTZ - 1;
-        assert!(prl < 1 << 20);
-        result.perform_write(|s| {
-            s.regs.prlh.write(|w| unsafe { w.bits(prl >> 16) });
-            s.regs.prll.write(|w| unsafe { w.bits(prl as u16 as u32) });
-        });
-
+    pub fn rtc_with_clock(clock: Clock, regs: RTC, bkp: &mut BackupDomain) -> Self {
+        let clock_frequency = match clock {
+            Clock::LSE(freq) | Clock::LSI(freq) | Clock::HSE(freq) => freq,
+        };
+        let mut result = Rtc {
+            regs,
+            clock_frequency,
+        };
+        Rtc::enable_rtc(clock, bkp);
+        result.select_frequency(1.hz());
         result
     }
 
-    /// Enables the RTC device with the lse as the clock
-    fn enable_rtc(_bkp: &mut BackupDomain) {
+    /// Enables the RTC device with the given clock
+    fn enable_rtc(clock: Clock, _bkp: &mut BackupDomain) {
         // NOTE: Safe RCC access because we are only accessing bdcr
         // and we have a &mut on BackupDomain
         let rcc = unsafe { &*RCC::ptr() };
         rcc.bdcr.modify(|_, w| {
             w
-                // start the LSE oscillator
-                .lseon()
-                .set_bit()
                 // Enable the RTC
                 .rtcen()
-                .set_bit()
-                // Set the source of the RTC to LSE
-                .rtcsel()
-                .lse()
-        })
+                .set_bit();
+            match clock {
+                Clock::LSE(_) => w.lseon().set_bit().rtcsel().lse(),
+                Clock::LSI(_) => w.rtcsel().lsi(),
+                Clock::HSE(_) => w.rtcsel().hse(),
+            }
+        });
     }
 
     /// Selects the frequency of the RTC Timer
@@ -76,9 +82,10 @@ impl Rtc {
 
         // The manual says that the zero value for the prescaler is not recommended, thus the
         // minimum division factor is 2 (prescaler + 1)
-        assert!(frequency <= LSE_HERTZ / 2);
+        assert!(frequency <= self.clock_frequency.0 / 2);
+        assert!(frequency > 0);
 
-        let prescaler = LSE_HERTZ / frequency - 1;
+        let prescaler = self.clock_frequency.0 / frequency - 1;
         self.perform_write(|s| {
             s.regs.prlh.write(|w| unsafe { w.bits(prescaler >> 16) });
             s.regs
