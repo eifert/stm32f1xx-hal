@@ -62,6 +62,9 @@ impl Rtc {
         // NOTE: Safe RCC access because we are only accessing bdcr
         // and we have a &mut on BackupDomain
         let rcc = unsafe { &*RCC::ptr() };
+        if let Clock::LSI(_) = clock {
+            rcc.csr.modify(|_, w| w.lsion().set_bit());
+        }
         rcc.bdcr.modify(|_, w| {
             w
                 // Enable the RTC
